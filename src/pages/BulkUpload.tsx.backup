@@ -1,0 +1,897 @@
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '@/db/supabase';
+import { Header } from '@/components/layouts/Header';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Upload, Download, CheckCircle, XCircle, ArrowLeft, FileText, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
+import { useAuth } from '@/contexts/AuthContext';
+import ExcelJS from 'exceljs';
+
+interface ProductRow {
+  'Product Name': string;
+  'Price': number;
+  'Quantity': number;
+  'Product Code': string;
+  'Category': string;
+  'Store Name': string;
+  'Currency'?: string;
+  'Product Image Link'?: string;
+  'Description'?: string;
+  'Barcode'?: string;
+  'Unit'?: string;
+}
+
+interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+interface UploadSummary {
+  total: number;
+  successful: number;
+  failed: number;
+  errors: Array<{ row: number; errors: string[] }>;
+}
+
+export default function BulkUpload() {
+  const [file, setFile] = useState<File | null>(null);
+  const [previewData, setPreviewData] = useState<ProductRow[]>([]);
+  const [validationResults, setValidationResults] = useState<ValidationResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
+  const [convertFile, setConvertFile] = useState<File | null>(null);
+  const [convertedData, setConvertedData] = useState<ProductRow[]>([]);
+  const [converting, setConverting] = useState(false);
+  const { user, profile } = useAuth();
+  const navigate = useNavigate();
+
+  const sellerStoreName = profile?.store_name || '';
+
+  const downloadTemplate = async () => {
+    if (!sellerStoreName) {
+      toast.error('Store name not found. Please update your profile.');
+      return;
+    }
+
+    try {
+      // Create a new workbook
+      const workbook = new ExcelJS.Workbook();
+      
+      // Sheet 1: Product_Data
+      const productSheet = workbook.addWorksheet('Product_Data');
+      
+      // Define columns for Product_Data
+      productSheet.columns = [
+        { header: 'Product Name', key: 'name', width: 25 },
+        { header: 'Price', key: 'price', width: 12 },
+        { header: 'Quantity', key: 'quantity', width: 12 },
+        { header: 'Product Code', key: 'code', width: 15 },
+        { header: 'Category', key: 'category', width: 15 },
+        { header: 'Store Name', key: 'store', width: 20 },
+        { header: 'Currency', key: 'currency', width: 12 },
+        { header: 'Product Image Link', key: 'image', width: 40 },
+        { header: 'Description', key: 'description', width: 30 },
+        { header: 'Barcode', key: 'barcode', width: 18 },
+        { header: 'Unit', key: 'unit', width: 10 },
+      ];
+      
+      // Style header row
+      const headerRow = productSheet.getRow(1);
+      headerRow.font = { bold: true, size: 11 };
+      headerRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE8E8E8' },
+      };
+      headerRow.alignment = { vertical: 'middle', horizontal: 'left' };
+      headerRow.height = 20;
+      
+      // Add sample data rows with seller's store name pre-filled
+      productSheet.addRow({
+        name: 'Fresh Tomatoes',
+        price: 2.99,
+        quantity: 100,
+        code: 'VEG001',
+        category: 'vegetables',
+        store: sellerStoreName,
+        currency: profile?.currency_preference || 'USD',
+        image: '',
+        description: 'Fresh red tomatoes',
+        barcode: '1234567890123',
+        unit: 'kg',
+      });
+      
+      productSheet.addRow({
+        name: 'Green Apples',
+        price: 3.49,
+        quantity: 50,
+        code: 'FRU001',
+        category: 'fruits',
+        store: sellerStoreName,
+        currency: profile?.currency_preference || 'USD',
+        image: '',
+        description: 'Crisp green apples',
+        barcode: '1234567890124',
+        unit: 'kg',
+      });
+      
+      // Add VLOOKUP formula to Product Image Link column (column H)
+      for (let i = 2; i <= 3; i++) {
+        const cell = productSheet.getCell(`H${i}`);
+        cell.value = {
+          formula: `IFERROR(VLOOKUP(D${i},Image_Master!B:C,2,FALSE),"")`,
+          result: '',
+        };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFEF9E7' },
+        };
+      }
+      
+      // Highlight required fields (columns A-F)
+      for (let col = 1; col <= 6; col++) {
+        const cell = productSheet.getCell(1, col);
+        cell.font = { bold: true, size: 11, color: { argb: 'FF000000' } };
+      }
+      
+      // Freeze header row
+      productSheet.views = [{ state: 'frozen', ySplit: 1 }];
+      
+      // Add data validation for Category column
+      for (let i = 2; i <= 100; i++) {
+        productSheet.getCell(`E${i}`).dataValidation = {
+          type: 'list',
+          allowBlank: false,
+          formulae: ['"vegetables,fruits,grocery,dairy,bakery,meat,beverages,snacks"'],
+          showErrorMessage: true,
+          errorTitle: 'Invalid Category',
+          error: 'Please select a valid category from the list',
+        };
+      }
+      
+      // Sheet 2: Image_Master
+      const imageMasterSheet = workbook.addWorksheet('Image_Master');
+      
+      // Define columns for Image_Master
+      imageMasterSheet.columns = [
+        { header: 'Product Name', key: 'name', width: 25 },
+        { header: 'Product Code', key: 'code', width: 15 },
+        { header: 'Product Image Link', key: 'image', width: 50 },
+      ];
+      
+      // Style header row
+      const imageMasterHeader = imageMasterSheet.getRow(1);
+      imageMasterHeader.font = { bold: true, size: 11 };
+      imageMasterHeader.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFD5E8D4' },
+      };
+      imageMasterHeader.alignment = { vertical: 'middle', horizontal: 'left' };
+      imageMasterHeader.height = 20;
+      
+      // Add sample data to Image_Master
+      imageMasterSheet.addRows([
+        {
+          name: 'Fresh Tomatoes',
+          code: 'VEG001',
+          image: 'https://example.com/images/tomatoes.jpg',
+        },
+        {
+          name: 'Green Apples',
+          code: 'FRU001',
+          image: 'https://example.com/images/apples.jpg',
+        },
+      ]);
+      
+      // Freeze header row
+      imageMasterSheet.views = [{ state: 'frozen', ySplit: 1 }];
+      
+      // Add instructions sheet
+      const instructionsSheet = workbook.addWorksheet('Instructions');
+      instructionsSheet.columns = [{ width: 80 }];
+      
+      instructionsSheet.addRow(['Smart Grocery - Bulk Product Upload Template']);
+      instructionsSheet.getCell('A1').font = { bold: true, size: 14 };
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['How to Use This Template:']);
+      instructionsSheet.getCell('A3').font = { bold: true, size: 12 };
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['1. Sheet "Product_Data": Enter your product information here']);
+      instructionsSheet.addRow(['   - Product Name, Price, Quantity, Product Code, Category, Store Name are REQUIRED']);
+      instructionsSheet.addRow([`   - Store Name must match: "${sellerStoreName}"`]);
+      instructionsSheet.addRow(['   - Product Image Link will auto-populate based on Product Code (via VLOOKUP)']);
+      instructionsSheet.addRow(['   - Description, Barcode, Unit are optional']);
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['2. Sheet "Image_Master": Maintain your product image URLs here']);
+      instructionsSheet.addRow(['   - Add Product Code and corresponding Image Link']);
+      instructionsSheet.addRow(['   - Product Image Link in Product_Data will automatically fetch from here']);
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['3. Valid Categories:']);
+      instructionsSheet.addRow(['   vegetables, fruits, grocery, dairy, bakery, meat, beverages, snacks']);
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['4. Store Validation:']);
+      instructionsSheet.addRow(['   - All products must have Store Name matching your store']);
+      instructionsSheet.addRow(['   - Products with mismatched store names will be rejected']);
+      instructionsSheet.addRow(['   - Product Code and Barcode must be unique within your store']);
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['5. After filling data, upload this Excel file to the application']);
+      
+      // Generate Excel file
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { 
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+      });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${sellerStoreName.replace(/\s+/g, '_')}_bulk_upload_template.xlsx`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+      
+      toast.success('Excel template downloaded successfully');
+    } catch (error) {
+      console.error('Error generating template:', error);
+      toast.error('Failed to generate template');
+    }
+  };
+        category: 'fruits',
+        currency: 'USD',
+        image: '', // Will be auto-filled by VLOOKUP
+        description: 'Crisp green apples',
+        barcode: '1234567890124',
+        unit: 'kg',
+      });
+      
+      // Add VLOOKUP formula to Product Image Link column (column G)
+      // Formula: =IFERROR(VLOOKUP(D2,Image_Master!B:C,2,FALSE),"")
+      for (let i = 2; i <= 3; i++) {
+        const cell = productSheet.getCell(`G${i}`);
+        cell.value = {
+          formula: `IFERROR(VLOOKUP(D${i},Image_Master!B:C,2,FALSE),"")`,
+          result: '',
+        };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFEF9E7' }, // Light yellow to indicate formula
+        };
+      }
+      
+      // Highlight required fields (columns A-F)
+      for (let col = 1; col <= 6; col++) {
+        const cell = productSheet.getCell(1, col);
+        cell.font = { bold: true, size: 11, color: { argb: 'FF000000' } };
+      }
+      
+      // Freeze header row
+      productSheet.views = [{ state: 'frozen', ySplit: 1 }];
+      
+      // Add data validation for Category column
+      for (let i = 2; i <= 100; i++) {
+        productSheet.getCell(`E${i}`).dataValidation = {
+          type: 'list',
+          allowBlank: false,
+          formulae: ['"vegetables,fruits,grocery,dairy,bakery,meat,beverages,snacks"'],
+          showErrorMessage: true,
+          errorTitle: 'Invalid Category',
+          error: 'Please select a valid category from the list',
+        };
+      }
+      
+      // Sheet 2: Image_Master
+      const imageMasterSheet = workbook.addWorksheet('Image_Master');
+      
+      // Define columns for Image_Master
+      imageMasterSheet.columns = [
+        { header: 'Product Name', key: 'name', width: 25 },
+        { header: 'Product Code', key: 'code', width: 15 },
+        { header: 'Product Image Link', key: 'image', width: 50 },
+      ];
+      
+      // Style header row
+      const imageMasterHeader = imageMasterSheet.getRow(1);
+      imageMasterHeader.font = { bold: true, size: 11 };
+      imageMasterHeader.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFD5E8D4' }, // Light green
+      };
+      imageMasterHeader.alignment = { vertical: 'middle', horizontal: 'left' };
+      imageMasterHeader.height = 20;
+      
+      // Add sample data to Image_Master
+      imageMasterSheet.addRows([
+        {
+          name: 'Fresh Tomatoes',
+          code: 'VEG001',
+          image: 'https://example.com/images/tomatoes.jpg',
+        },
+        {
+          name: 'Green Apples',
+          code: 'FRU001',
+          image: 'https://example.com/images/apples.jpg',
+        },
+        {
+          name: 'Organic Carrots',
+          code: 'VEG002',
+          image: 'https://example.com/images/carrots.jpg',
+        },
+      ]);
+      
+      // Freeze header row
+      imageMasterSheet.views = [{ state: 'frozen', ySplit: 1 }];
+      
+      // Add instructions sheet
+      const instructionsSheet = workbook.addWorksheet('Instructions');
+      instructionsSheet.columns = [{ width: 80 }];
+      
+      instructionsSheet.addRow(['Smart Grocery - Bulk Product Upload Template']);
+      instructionsSheet.getCell('A1').font = { bold: true, size: 14 };
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['How to Use This Template:']);
+      instructionsSheet.getCell('A3').font = { bold: true, size: 12 };
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['1. Sheet "Product_Data": Enter your product information here']);
+      instructionsSheet.addRow(['   - Product Name, Price, Quantity, Product Code, Category, Currency are REQUIRED']);
+      instructionsSheet.addRow(['   - Product Image Link will auto-populate based on Product Code (via VLOOKUP)']);
+      instructionsSheet.addRow(['   - Description, Barcode, Unit are optional']);
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['2. Sheet "Image_Master": Maintain your product image URLs here']);
+      instructionsSheet.addRow(['   - Add Product Code and corresponding Image Link']);
+      instructionsSheet.addRow(['   - Product Image Link in Product_Data will automatically fetch from here']);
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['3. Valid Categories:']);
+      instructionsSheet.addRow(['   vegetables, fruits, grocery, dairy, bakery, meat, beverages, snacks']);
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['4. Currency: Use standard currency codes (USD, EUR, GBP, INR, etc.)']);
+      instructionsSheet.addRow([]);
+      
+      instructionsSheet.addRow(['5. After filling data, upload this Excel file to the application']);
+      
+      // Generate Excel file
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { 
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+      });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'smart_grocery_bulk_upload_template.xlsx';
+      a.click();
+      window.URL.revokeObjectURL(url);
+      
+      toast.success('Excel template downloaded successfully');
+    } catch (error) {
+      console.error('Error generating template:', error);
+      toast.error('Failed to generate template');
+    }
+  };
+
+  const validateRow = (row: ProductRow, index: number): ValidationResult => {
+    const errors: string[] = [];
+
+    // Store Name validation (CRITICAL - must match first)
+    if (!row['Store Name'] || row['Store Name'].trim() === '') {
+      errors.push('Store Name is required');
+    } else if (row['Store Name'].trim().toLowerCase() !== sellerStoreName.toLowerCase()) {
+      errors.push(`Store name mismatch. Expected: "${sellerStoreName}"`);
+      // If store doesn't match, don't validate other fields
+      return { valid: false, errors };
+    }
+
+    if (!row['Product Name'] || row['Product Name'].trim() === '') {
+      errors.push('Product Name is required');
+    }
+    if (!row['Price'] || isNaN(Number(row['Price'])) || Number(row['Price']) <= 0) {
+      errors.push('Valid Price is required');
+    }
+    if (!row['Quantity'] || isNaN(Number(row['Quantity'])) || Number(row['Quantity']) <= 0) {
+      errors.push('Valid Quantity is required');
+    }
+    if (!row['Product Code'] || row['Product Code'].trim() === '') {
+      errors.push('Product Code is required');
+    }
+    if (!row['Category'] || row['Category'].trim() === '') {
+      errors.push('Category is required');
+    }
+
+    const validCategories = ['vegetables', 'fruits', 'grocery', 'dairy', 'bakery', 'meat', 'beverages', 'snacks'];
+    if (row['Category'] && !validCategories.includes(row['Category'].toLowerCase())) {
+      errors.push(`Invalid category. Must be one of: ${validCategories.join(', ')}`);
+    }
+
+    return { valid: errors.length === 0, errors };
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) return;
+
+    // Check file size (5MB limit)
+    if (selectedFile.size > 5 * 1024 * 1024) {
+      toast.error('File size exceeds 5MB limit');
+      return;
+    }
+
+    // Check file format
+    const fileExtension = selectedFile.name.split('.').pop()?.toLowerCase();
+    if (!['xlsx', 'xls'].includes(fileExtension || '')) {
+      toast.error('Invalid file format. Please upload Excel file (.xlsx)');
+      return;
+    }
+
+    setFile(selectedFile);
+    setUploadSummary(null);
+
+    // Parse Excel file
+    try {
+      const arrayBuffer = await selectedFile.arrayBuffer();
+      await parseExcel(arrayBuffer);
+    } catch (error) {
+      console.error('Error reading file:', error);
+      toast.error('Failed to read file');
+    }
+  };
+
+  const parseExcel = async (arrayBuffer: ArrayBuffer) => {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(arrayBuffer);
+      
+      // Get Product_Data sheet
+      const productSheet = workbook.getWorksheet('Product_Data');
+      if (!productSheet) {
+        toast.error('Sheet "Product_Data" not found. Please use the correct template.');
+        return;
+      }
+      
+      const rows: ProductRow[] = [];
+      const validations: ValidationResult[] = [];
+      
+      // Skip header row (row 1)
+      productSheet.eachRow((row, rowNumber) => {
+        if (rowNumber === 1) return; // Skip header
+        
+        const rowData: any = {
+          'Product Name': row.getCell(1).value?.toString() || '',
+          'Price': parseFloat(row.getCell(2).value?.toString() || '0'),
+          'Quantity': parseFloat(row.getCell(3).value?.toString() || '0'),
+          'Product Code': row.getCell(4).value?.toString() || '',
+          'Category': row.getCell(5).value?.toString() || '',
+          'Store Name': row.getCell(6).value?.toString() || '',
+          'Currency': row.getCell(7).value?.toString() || '',
+          'Product Image Link': row.getCell(8).value?.toString() || '',
+          'Description': row.getCell(9).value?.toString() || '',
+          'Barcode': row.getCell(10).value?.toString() || '',
+          'Unit': row.getCell(11).value?.toString() || '',
+        };
+        
+        rows.push(rowData);
+        validations.push(validateRow(rowData, rowNumber));
+      });
+      
+      if (rows.length === 0) {
+        toast.error('No data found in the file');
+        return;
+      }
+      
+      setPreviewData(rows);
+      setValidationResults(validations);
+      
+      const validCount = validations.filter(v => v.valid).length;
+      const invalidCount = validations.filter(v => !v.valid).length;
+      
+      if (invalidCount > 0) {
+        toast.warning(`Loaded ${rows.length} products: ${validCount} valid, ${invalidCount} invalid`);
+      } else {
+        toast.success(`Loaded ${rows.length} products - all valid!`);
+      }
+    } catch (error) {
+      console.error('Error parsing Excel:', error);
+      toast.error('Failed to parse Excel file. Please check the format.');
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!file || previewData.length === 0) {
+      toast.error('Please select a file first');
+      return;
+    }
+
+    // Check if there are any valid rows
+    const validRows = previewData.filter((_, index) => validationResults[index].valid);
+    if (validRows.length === 0) {
+      toast.error('No valid products to upload. Please fix the errors first.');
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      // Convert preview data to base64 for Edge Function
+      const dataToSend = previewData.map((row, index) => ({
+        ...row,
+        validation: validationResults[index],
+      }));
+
+      const { data, error } = await supabase.functions.invoke('bulk_upload_products', {
+        body: {
+          products: dataToSend,
+          sellerId: user!.id,
+          storeName: sellerStoreName,
+        },
+      });
+
+      if (error) {
+        const errorMsg = await error?.context?.text();
+        toast.error(errorMsg || error.message);
+        setLoading(false);
+        return;
+      }
+
+      if (data?.success) {
+        setUploadSummary(data.summary);
+        toast.success(`Upload complete! ${data.summary.successful} products added successfully.`);
+        if (data.summary.failed > 0) {
+          toast.warning(`${data.summary.failed} products failed. Check the summary below.`);
+        }
+      } else {
+        toast.error(data?.message || 'Upload failed');
+      }
+    } catch (err) {
+      console.error('Upload error:', err);
+      toast.error('An error occurred during upload');
+    }
+
+    setLoading(false);
+  };
+
+  // File Conversion Functions
+  const handleConvertFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) return;
+
+    // Check file size (5MB limit)
+    if (selectedFile.size > 5 * 1024 * 1024) {
+      toast.error('File size exceeds 5MB limit');
+      return;
+    }
+
+    // Check file format
+    const fileExtension = selectedFile.name.split('.').pop()?.toLowerCase();
+    if (!['csv', 'txt'].includes(fileExtension || '')) {
+      toast.error('Invalid file format. Please upload CSV or TXT file');
+      return;
+    }
+
+    setConvertFile(selectedFile);
+    setConvertedData([]);
+  };
+
+  const parseCSV = (text: string): ProductRow[] => {
+    const lines = text.split('\n').filter(line => line.trim());
+    if (lines.length === 0) return [];
+
+    const headers = lines[0].split(',').map(h => h.trim());
+    const products: ProductRow[] = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split(',').map(v => v.trim());
+      const row: any = {};
+
+      headers.forEach((header, index) => {
+        row[header] = values[index] || '';
+      });
+
+      // Map to our template format
+      const product: ProductRow = {
+        'Product Name': row['Product Name'] || row['Name'] || row['Item'] || '',
+        'Price': parseFloat(row['Price'] || row['Rate'] || row['Amount'] || '0'),
+        'Quantity': parseFloat(row['Quantity'] || row['Qty'] || row['Stock'] || '0'),
+        'Product Code': row['Product Code'] || row['Code'] || row['SKU'] || '',
+        'Category': row['Category'] || 'grocery',
+        'Store Name': sellerStoreName,
+        'Currency': row['Currency'] || profile?.currency_preference || 'USD',
+        'Product Image Link': row['Image'] || row['Image URL'] || '',
+        'Description': row['Description'] || row['Details'] || '',
+        'Barcode': row['Barcode'] || row['EAN'] || '',
+        'Unit': row['Unit'] || row['UOM'] || 'piece',
+      };
+
+      products.push(product);
+    }
+
+    return products;
+  };
+
+  const handleConvert = async () => {
+    if (!convertFile) {
+      toast.error('Please select a file to convert');
+      return;
+    }
+
+    setConverting(true);
+
+    try {
+      const text = await convertFile.text();
+      const products = parseCSV(text);
+
+      if (products.length === 0) {
+        toast.error('No data found in the file');
+        setConverting(false);
+        return;
+      }
+
+      setConvertedData(products);
+      toast.success(`Converted ${products.length} products successfully`);
+    } catch (error) {
+      console.error('Error converting file:', error);
+      toast.error('Failed to convert file. Please check the format.');
+    }
+
+    setConverting(false);
+  };
+
+  const downloadConvertedExcel = async () => {
+    if (convertedData.length === 0) {
+      toast.error('No data to download');
+      return;
+    }
+
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Product_Data');
+
+      // Define columns
+      sheet.columns = [
+        { header: 'Product Name', key: 'name', width: 25 },
+        { header: 'Price', key: 'price', width: 12 },
+        { header: 'Quantity', key: 'quantity', width: 12 },
+        { header: 'Product Code', key: 'code', width: 15 },
+        { header: 'Category', key: 'category', width: 15 },
+        { header: 'Store Name', key: 'store', width: 20 },
+        { header: 'Currency', key: 'currency', width: 12 },
+        { header: 'Product Image Link', key: 'image', width: 40 },
+        { header: 'Description', key: 'description', width: 30 },
+        { header: 'Barcode', key: 'barcode', width: 18 },
+        { header: 'Unit', key: 'unit', width: 10 },
+      ];
+
+      // Style header
+      const headerRow = sheet.getRow(1);
+      headerRow.font = { bold: true, size: 11 };
+      headerRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE8E8E8' },
+      };
+
+      // Add data
+      convertedData.forEach(product => {
+        sheet.addRow({
+          name: product['Product Name'],
+          price: product['Price'],
+          quantity: product['Quantity'],
+          code: product['Product Code'],
+          category: product['Category'],
+          store: product['Store Name'],
+          currency: product['Currency'],
+          image: product['Product Image Link'],
+          description: product['Description'],
+          barcode: product['Barcode'],
+          unit: product['Unit'],
+        });
+      });
+
+      // Generate file
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `converted_products_${Date.now()}.xlsx`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+
+      toast.success('Excel file downloaded successfully');
+    } catch (error) {
+      console.error('Error generating Excel:', error);
+      toast.error('Failed to generate Excel file');
+    }
+  };
+
+  const updateConvertedData = (index: number, field: keyof ProductRow, value: string | number) => {
+    const updated = [...convertedData];
+    updated[index] = { ...updated[index], [field]: value };
+    setConvertedData(updated);
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Header />
+      <main className="flex-1 container py-8 space-y-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold">Bulk Product Upload</h1>
+            <p className="text-muted-foreground mt-1">Upload multiple products at once using Excel template with automatic image mapping</p>
+          </div>
+          <Button variant="ghost" onClick={() => navigate('/seller/products')}>
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Back to Products
+          </Button>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Upload Instructions</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <Alert>
+              <AlertDescription>
+                <ol className="list-decimal list-inside space-y-2 text-sm">
+                  <li>Download the Excel template with two sheets: Product_Data and Image_Master</li>
+                  <li>Fill product details in Product_Data sheet (Product Name, Price, Quantity, Product Code, Category, Currency)</li>
+                  <li>Add product image URLs in Image_Master sheet with corresponding Product Codes</li>
+                  <li>Product Image Link will auto-populate using VLOOKUP formula based on Product Code</li>
+                  <li>Valid categories: vegetables, fruits, grocery, dairy, bakery, meat, beverages, snacks</li>
+                  <li>Product Code and Barcode must be unique across all products</li>
+                  <li>Maximum file size: 5MB</li>
+                </ol>
+              </AlertDescription>
+            </Alert>
+
+            <Button onClick={downloadTemplate} variant="outline">
+              <Download className="mr-2 h-4 w-4" />
+              Download Excel Template
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Upload File</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="border-2 border-dashed rounded-lg p-8 text-center">
+              <Upload className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleFileChange}
+                className="hidden"
+                id="file-upload"
+              />
+              <label htmlFor="file-upload">
+                <Button variant="outline" asChild>
+                  <span>Choose File</span>
+                </Button>
+              </label>
+              <p className="text-sm text-muted-foreground mt-2">
+                {file ? file.name : 'Accepts Excel files (.xlsx) with Product_Data sheet (max 5MB)'}
+              </p>
+            </div>
+
+            {previewData.length > 0 && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-medium">Data Preview ({previewData.length} rows)</h3>
+                  <Button onClick={handleUpload} disabled={loading}>
+                    {loading ? 'Uploading...' : 'Confirm Upload'}
+                  </Button>
+                </div>
+
+                <div className="border rounded-lg overflow-auto max-h-96">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-12">Status</TableHead>
+                        <TableHead>Product Name</TableHead>
+                        <TableHead>Price</TableHead>
+                        <TableHead>Quantity</TableHead>
+                        <TableHead>Product Code</TableHead>
+                        <TableHead>Category</TableHead>
+                        <TableHead>Errors</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {previewData.map((row, index) => (
+                        <TableRow key={index}>
+                          <TableCell>
+                            {validationResults[index]?.valid ? (
+                              <CheckCircle className="h-4 w-4 text-green-500" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-red-500" />
+                            )}
+                          </TableCell>
+                          <TableCell>{row['Product Name']}</TableCell>
+                          <TableCell>${row['Price']}</TableCell>
+                          <TableCell>{row['Quantity']}</TableCell>
+                          <TableCell>{row['Product Code']}</TableCell>
+                          <TableCell>
+                            <Badge variant="secondary">{row['Category']}</Badge>
+                          </TableCell>
+                          <TableCell>
+                            {validationResults[index]?.errors.length > 0 && (
+                              <div className="text-xs text-red-500">
+                                {validationResults[index].errors.join(', ')}
+                              </div>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {uploadSummary && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Upload Summary</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-3 gap-4">
+                <div className="text-center p-4 border rounded-lg">
+                  <p className="text-2xl font-semibold">{uploadSummary.total}</p>
+                  <p className="text-sm text-muted-foreground">Total Records</p>
+                </div>
+                <div className="text-center p-4 border rounded-lg bg-green-50">
+                  <p className="text-2xl font-semibold text-green-600">{uploadSummary.successful}</p>
+                  <p className="text-sm text-muted-foreground">Successful</p>
+                </div>
+                <div className="text-center p-4 border rounded-lg bg-red-50">
+                  <p className="text-2xl font-semibold text-red-600">{uploadSummary.failed}</p>
+                  <p className="text-sm text-muted-foreground">Failed</p>
+                </div>
+              </div>
+
+              {uploadSummary.errors.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="font-medium">Failed Records:</h4>
+                  <div className="border rounded-lg p-4 space-y-2 max-h-64 overflow-auto">
+                    {uploadSummary.errors.map((error, index) => (
+                      <div key={index} className="text-sm">
+                        <span className="font-medium">Row {error.row}:</span>{' '}
+                        <span className="text-red-500">{error.errors.join(', ')}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <Button onClick={() => navigate('/seller/products')} className="w-full">
+                Go to Product Management
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+      </main>
+    </div>
+  );
+}
