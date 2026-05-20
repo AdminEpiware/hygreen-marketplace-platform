@@ -21,7 +21,44 @@ HyGreen enables:
 - Secure backend integration using Supabase
 
 ---
+## 🏗️ Architecture Diagram
 
+```text
+                    ┌─────────────────────┐
+                    │      Buyers         │
+                    └─────────┬───────────┘
+                              │
+                              ▼
+                    ┌─────────────────────┐
+                    │  HyGreen Frontend   │
+                    │  (React + Vite UI)  │
+                    └─────────┬───────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+┌──────────────┐   ┌──────────────────┐   ┌─────────────────┐
+│ Seller Panel │   │ Admin Management │   │ Authentication  │
+│ Product Mgmt │   │ Verification     │   │ User Access     │
+└──────┬───────┘   └────────┬─────────┘   └────────┬────────┘
+       │                    │                       │
+       └────────────────────┼───────────────────────┘
+                            ▼
+                 ┌─────────────────────┐
+                 │      Supabase       │
+                 │ PostgreSQL Database │
+                 │ Authentication      │
+                 │ Storage & APIs      │
+                 └─────────┬───────────┘
+                           │
+                           ▼
+                ┌──────────────────────┐
+                │ Payment & Billing    │
+                │ UPI / Pay Later      │
+                │ Order Processing     │
+                └──────────────────────┘
+```
+---
 ## 🎥 Demo Video
 
 https://www.youtube.com/watch?v=jxKIsDCmcbQ
